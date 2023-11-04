@@ -249,6 +249,18 @@ class QuicLoggerTrace:
             "stream_id": stream_id,
         }
 
+    def encode_additional_addresses_frame(self, sequence_no: int, additional_addresses: List[dict]) -> Dict:
+        return {
+            "frame_type": "additional_addresses",
+            "sequence_number": sequence_no,
+            "additional_addresses_count": len(additional_addresses),
+            "additional_addresses": [{
+                "address_version": x["address_version"],
+                "ip_address": x["ip_address"],
+                "ip_port": x["port"]
+            } for x in additional_addresses],
+        }
+
     def _encode_http3_headers(self, headers: Headers) -> List[Dict]:
         return [
             {"name": h[0].decode("utf8"), "value": h[1].decode("utf8")} for h in headers
