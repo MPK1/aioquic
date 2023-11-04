@@ -287,6 +287,7 @@ class QuicTransportParameters:
     retry_source_connection_id: Optional[bytes] = None
     max_datagram_frame_size: Optional[int] = None
     quantum_readiness: Optional[bytes] = None
+    additional_addresses: Optional[bool] = False
 
 
 PARAMS = {
@@ -310,6 +311,8 @@ PARAMS = {
     # extensions
     0x0020: ("max_datagram_frame_size", int),
     0x0C37: ("quantum_readiness", bytes),
+    # extension: draft-piraux-quic-additional-addresses
+    0x925ADDA01: ("additional_addresses", bool),
 }
 
 
@@ -431,6 +434,8 @@ class QuicFrameType(IntEnum):
     HANDSHAKE_DONE = 0x1E
     DATAGRAM = 0x30
     DATAGRAM_WITH_LENGTH = 0x31
+    # extension: draft-piraux-quic-additional-addresses
+    ADDITIONAL_ADDRESSES = 0x925ADDA01
 
 
 NON_ACK_ELICITING_FRAME_TYPES = frozenset(
