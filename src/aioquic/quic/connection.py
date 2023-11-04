@@ -1,4 +1,5 @@
 import binascii
+import ipaddress
 import logging
 import os
 from collections import deque
@@ -101,6 +102,8 @@ RETIRE_CONNECTION_ID_CAPACITY = 1 + UINT_VAR_MAX_SIZE
 STOP_SENDING_FRAME_CAPACITY = 1 + 2 * UINT_VAR_MAX_SIZE
 STREAMS_BLOCKED_CAPACITY = 1 + UINT_VAR_MAX_SIZE
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 3 * UINT_VAR_MAX_SIZE  # + reason length
+# The next line limits the frame to max. 16 additional addresses.
+ADDITIONAL_ADDRESSES_FRAME_CAPACITY = 3 * UINT_VAR_MAX_SIZE + 16 * 19
 
 
 def EPOCHS(shortcut: str) -> FrozenSet[tls.Epoch]:
@@ -206,6 +209,19 @@ class QuicReceiveContext:
     network_path: QuicNetworkPath
     quic_logger_frames: Optional[List[Any]]
     time: float
+
+@dataclass
+class AdditionalAddress:
+    address_version: int
+    ip_address: ipaddress.IPv4Address | ipaddress.IPv6Address
+    port: int
+
+    def to_object(self):
+        return {
+            "address_version": self.address_version,
+            "ip_address": str(self.ip_address),
+            "port": self.port
+        }
 
 
 END_STATES = frozenset(
@@ -341,6 +357,7 @@ class QuicConnection:
         self._streams_finished: Set[int] = set()
         self._version: Optional[int] = None
         self._version_negotiation_count = 0
+        self._additional_addresses = self._is_client
 
         if self._is_client:
             self._original_destination_connection_id = self._peer_cid.cid
@@ -416,6 +433,7 @@ class QuicConnection:
             0x1E: (self._handle_handshake_done_frame, EPOCHS("1")),
             0x30: (self._handle_datagram_frame, EPOCHS("01")),
             0x31: (self._handle_datagram_frame, EPOCHS("01")),
+            0x925ADDA01: (self._handle_additional_addresses_frame, EPOCHS("1")),
         }
 
     @property
@@ -2182,6 +2200,46 @@ class QuicConnection:
                 )
             )
 
+    def _handle_additional_addresses_frame(
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        """
+        Handle a ADDITIONAL_ADDRESSES frame.
+        """
+        if not self._is_client:
+            raise QuicConnectionError(
+                error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+                frame_type=frame_type,
+                reason_phrase="ADDITIONAL_ADDRESSES frames MUST NOT be sent by a client!",
+            )
+        sequence_no = buf.pull_uint_var()
+        additional_addresses_count = buf.pull_uint_var()
+        self._logger.debug(f"Handling ADDITIONAL_ADDRESSES frame with seq_no {sequence_no} that contains {additional_addresses_count} addresses")
+        additional_addresses = []
+        for x in range(additional_addresses_count):
+            address_version = buf.pull_uint8()
+            if address_version == 4:
+                ip_address = ipaddress.ip_address(buf.pull_bytes(4))
+            elif address_version == 6:
+                ip_address = ipaddress.ip_address(buf.pull_bytes(16))
+            else:
+                self._logger.debug(f"The ADDITIONAL_ADDRESSES frame is ignored as the address_version\"{address_version}\" is unknown.")
+                return
+            ip_port = buf.pull_uint16()
+            a = AdditionalAddress(address_version=address_version, ip_address=ip_address, port=ip_port)
+            additional_addresses.append(a)
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_additional_addresses_frame(
+                    sequence_no=sequence_no,
+                    additional_addresses=[x.to_object() for x in additional_addresses]
+                )
+            )
+
+        # TODO: do useful stuff with the obtained addresses
+
     def _log_key_retired(self, key_type: str, trigger: str) -> None:
         """
         Log a key retirement.
@@ -2536,6 +2594,7 @@ class QuicConnection:
             if self._configuration.quantum_readiness_test
             else None,
             stateless_reset_token=self._host_cids[0].stateless_reset_token,
+            additional_addresses=self._additional_addresses,
         )
         if not self._is_client:
             quic_transport_parameters.original_destination_connection_id = (
@@ -3228,5 +3287,30 @@ class QuicConnection:
                 self._quic_logger.encode_streams_blocked_frame(
                     is_unidirectional=frame_type == QuicFrameType.STREAMS_BLOCKED_UNI,
                     limit=limit,
+                )
+            )
+
+    def _write_additional_addresses_frame(
+        self,
+        builder: QuicPacketBuilder,
+        sequence_no: int,
+        additional_addresses: List[AdditionalAddress]
+    ) -> None:
+        buf = builder.start_frame(
+            frame_type=QuicFrameType.ADDITIONAL_ADDRESSES,
+            capacity=ADDITIONAL_ADDRESSES_FRAME_CAPACITY,
+        )
+        buf.push_uint_var(sequence_no)
+        buf.push_uint_var(len(additional_addresses))
+        for x in additional_addresses:
+            buf.push_uint8(x.address_version)
+            buf.push_bytes(x.ip_address.packed)
+            buf.push_uint16(x.port)
+        # log frame
+        if self._quic_logger is not None:
+            builder.quic_logger_frames.append(
+                self._quic_logger.encode_additional_addresses_frame(
+                    sequence_no=sequence_no,
+                    additional_addresses=[x.to_object() for x in additional_addresses]
                 )
             )
